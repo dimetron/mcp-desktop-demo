@@ -28,12 +28,23 @@ TOKEN_FILE=$OUT/gw-token
 port()  { case $1 in cdm) echo 18081 ;; cua) echo 18082 ;; mtls) echo 18443 ;; esac; }
 image() { case $1 in mtls) echo mcp-desktop:x11 ;; *) echo "mcp-desktop:$1" ;; esac; }
 
+# The sandboxes run as uid 65532, so they are already unprivileged; HARDEN only
+# removes the remaining ambient rights (caps, setuid escalation, writable rootfs).
+# ROOTLESS=0 keeps the old behaviour.
+HARDEN_ARGS=()
+if [ "${ROOTLESS:-1}" != 0 ]; then
+  HARDEN_ARGS=(--cap-drop=ALL --security-opt=no-new-privileges:true --read-only
+               --tmpfs "/tmp:rw,nosuid,nodev,uid=65532,gid=65532,mode=1777"
+               --tmpfs "/data:rw,nosuid,nodev,uid=65532,gid=65532,mode=0755")
+fi
+
 case "$RUNTIME" in
-  runc)   D=(docker); RUN_ARGS=(); BIND=127.0.0.1: ;;
+  runc)   D=(docker); RUN_ARGS=("${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}"); BIND=127.0.0.1: ;;
   gvisor)
     D=(docker -H "tcp://127.0.0.1:$GVISOR_DOCKER_PORT")
     # gVisor's netstack bypasses Docker's embedded DNS (127.0.0.11).
-    RUN_ARGS=(--runtime=runsc -v /etc/sandbox-resolv.conf:/etc/resolv.conf:ro)
+    RUN_ARGS=(--runtime=runsc -v /etc/sandbox-resolv.conf:/etc/resolv.conf:ro
+              "${HARDEN_ARGS[@]+"${HARDEN_ARGS[@]}"}")
     BIND= ;;
   *) echo "RUNTIME must be runc or gvisor" >&2; exit 2 ;;
 esac
