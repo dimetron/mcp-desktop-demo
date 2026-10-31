@@ -1,0 +1,84 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: desktop-gw/go.mod
+          cache-dependency-path: desktop-gw/go.sum
+      - run: make test
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install kubeconform
+        run: |
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz \
+            | sudo tar -xz -C /usr/local/bin kubeconform
+      - name: Install actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7 /usr/local/bin
+      - run: make lint
+
+  e2e:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        runtime: [runc, gvisor]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run e2e
+        run: make e2e RUNTIME=${{ matrix.runtime }}
+      - name: Logs on failure
+        if: failure()
+        run: for v in cdm cua mtls; do RUNTIME=${{ matrix.runtime }} ./e2e.sh logs "$v" || true; done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frames-${{ matrix.runtime }}
+          path: out/frame-*.jpg
+          if-no-files-found: ignore
+      - if: always()
+        run: make down
+
+  kind:
+    needs: unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run kind e2e
+        run: make kind-e2e
+      - name: Cluster state on failure
+        if: failure()
+        env:
+          KUBECONFIG: out/kubeconfig
+        run: |
+          kubectl -n kagent get all,remotemcpservers,sandboxtemplates || true
+          kubectl -n kagent describe pod -l app.kubernetes.io/name=mcp-desktop || true
+          kubectl -n kagent logs deploy/mcp-desktop --tail=200 || true
+      - if: always()
+        run: make kind-down

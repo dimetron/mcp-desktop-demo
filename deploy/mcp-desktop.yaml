@@ -1,0 +1,105 @@
+# Long-running desktop whose /mcp endpoint kagent agents use through the
+# RemoteMCPServer in remotemcpserver.yaml. The bearer token comes from the
+# mcp-desktop-auth Secret (`make deploy-secret`).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-desktop
+  labels:
+    app.kubernetes.io/name: mcp-desktop
+    app.kubernetes.io/component: mcp-server
+spec:
+  replicas: 1
+  # MCP sessions and the X display live in one pod; never run two at once.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mcp-desktop
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mcp-desktop
+        app.kubernetes.io/component: mcp-server
+    spec:
+      # Uncomment on clusters with a gVisor RuntimeClass (Chrome runs --no-sandbox).
+      # runtimeClassName: gvisor
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: desktop
+          image: mcp-desktop
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: GW_TOKEN_FILE
+              value: /var/run/desktop-gw/token
+            - name: GEOMETRY
+              value: 1280x800x24
+            - name: BROWSER_URL
+              value: about:blank
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: token
+              mountPath: /var/run/desktop-gw
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: token
+          secret:
+            secretName: mcp-desktop-auth
+            defaultMode: 0440
+            items:
+              - key: token
+                path: token
+        - name: data
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-desktop
+  labels:
+    app.kubernetes.io/name: mcp-desktop
+spec:
+  selector:
+    app.kubernetes.io/name: mcp-desktop
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,34 @@
+# Standalone kagent Sandbox environment (Substrate Actor, gVisor by default).
+# kagent replaces the image entrypoint with its guest, so start the desktop
+# through the process API (see README "Deploy to kagent"). desktop-gw binds to
+# loopback because sandboxes have no port forwarding yet (ADR gap 1).
+# The image must be pinned by digest; `make manifests DIGEST=sha256:...` sets it.
+apiVersion: api.kagent.dev/v1alpha3
+kind: SandboxTemplate
+metadata:
+  name: mcp-desktop
+spec:
+  workload:
+    image: mcp-desktop
+  env:
+    - name: DISPLAY
+      value: ":0"
+    - name: HOME
+      value: /data
+    - name: GEOMETRY
+      value: 1280x800x24
+    - name: BROWSER_URL
+      value: about:blank
+    - name: GW_LISTEN
+      value: 127.0.0.1:8080
+    - name: GW_MCP_CMD
+      value: exec cua-driver mcp
+    - name: CUA_DRIVER_RS_TELEMETRY_ENABLED
+      value: "0"
+    - name: CUA_TELEMETRY_ENABLED
+      value: "0"
+  substrate:
+    workerPoolRef:
+      name: kagent-default
+    snapshotPolicy:
+      location: gs://ate-snapshots/kagent/mcp-desktop/

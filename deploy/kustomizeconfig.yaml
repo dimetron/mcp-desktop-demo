@@ -1,0 +1,4 @@
+# Lets the kustomize image transformer pin SandboxTemplate.spec.workload.image.
+images:
+  - path: spec/workload/image
+    kind: SandboxTemplate

@@ -1,0 +1,37 @@
+# Docker-in-Docker host with gVisor registered as the "runsc" runtime.
+# Pins the gVisor release from Substrate v1.0.0-rc1's gvisor-default
+# SandboxConfig (v6) so local runs match the sandbox kernel kagent uses.
+FROM docker:29-dind
+
+ARG GVISOR_RELEASE=20261026.0
+ARG GVISOR_SHA256_AARCH64=6257e49955f13e6caceb2c4181c5dc5406c460e805940c944e67ad65553f5b02
+ARG GVISOR_SHA256_X86_64=708afc62f2ee82d19930c703e85f9dab4f27a78c0aec40c0f55eb1040107f1a7
+
+RUN set -eu; \
+    apk add --no-cache curl zstd; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+      aarch64) sha="$GVISOR_SHA256_AARCH64" ;; \
+      x86_64) sha="$GVISOR_SHA256_X86_64" ;; \
+      *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSLo /tmp/gvisor.tar.zstd \
+      "https://storage.googleapis.com/gvisor/releases/release/${GVISOR_RELEASE}/${arch}/gvisor.tar.zstd"; \
+    echo "$sha  /tmp/gvisor.tar.zstd" | sha256sum -c -; \
+    mkdir -p /opt/gvisor; \
+    zstd -dc /tmp/gvisor.tar.zstd | tar -x -C /opt/gvisor; \
+    rm /tmp/gvisor.tar.zstd; \
+    /opt/gvisor/runsc --version
+
+# Global flags from Substrate's ateworker-gvisor internal_flags.json
+# (--host-settings=ignore, --allow-suid) plus --cpu-num-from-quota for create.
+RUN mkdir -p /etc/docker && cat >/etc/docker/daemon.json <<'EOF'
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/opt/gvisor/runsc",
+      "runtimeArgs": ["--host-settings=ignore", "--allow-suid", "--cpu-num-from-quota"]
+    }
+  }
+}
+EOF

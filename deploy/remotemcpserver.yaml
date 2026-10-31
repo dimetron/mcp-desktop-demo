@@ -1,0 +1,23 @@
+# Registers the Deployment's /mcp endpoint with kagent. The Authorization header
+# is Secret-backed, so the egress gateway injects it and agents never see it.
+# The Secret value must be the full header: "Bearer <token>".
+# `make manifests` rewrites the URL for NAMESPACE.
+apiVersion: api.kagent.dev/v1alpha3
+kind: RemoteMCPServer
+metadata:
+  name: mcp-desktop
+spec:
+  description: >-
+    Headless Linux desktop with Chromium. cua-driver tools drive windows, mouse,
+    keyboard and screenshots; desktop_view returns a live viewer (MCP App).
+  url: http://mcp-desktop.kagent.svc.cluster.local:8080/mcp
+  protocol: STREAMABLE_HTTP
+  timeout: 60s
+  sseReadTimeout: 5m0s
+  terminateOnClose: true
+  headersFrom:
+    - name: Authorization
+      valueFrom:
+        type: Secret
+        name: mcp-desktop-auth
+        key: authorization

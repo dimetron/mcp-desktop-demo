@@ -1,0 +1,16 @@
+# Base for kagent: an MCP server Deployment + RemoteMCPServer, and a
+# SandboxTemplate. Render with `make manifests`, which pins the image digest and
+# namespace. The mcp-desktop-auth Secret is created separately (`make deploy-secret`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: kagent
+resources:
+  - mcp-desktop.yaml
+  - remotemcpserver.yaml
+  - sandboxtemplate.yaml
+configurations:
+  - kustomizeconfig.yaml
+images:
+  - name: mcp-desktop
+    newName: ghcr.io/dimetron/mcp-desktop
+    newTag: cua

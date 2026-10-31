@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sandbox desktop</title>
+<style>
+  :root { color-scheme: light dark; --bg: #111; --fg: #ddd; --muted: #888; --accent: #3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 13px system-ui, sans-serif; }
+  header { display: flex; gap: 8px; align-items: center; padding: 6px 8px; }
+  header .grow { flex: 1; }
+  #status { color: var(--muted); }
+  #status.live::before { content: "● "; color: #22c55e; }
+  button { font: inherit; padding: 3px 10px; border-radius: 6px; border: 1px solid #555; background: #222; color: var(--fg); cursor: pointer; }
+  button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  #wrap { position: relative; }
+  canvas { display: block; width: 100%; height: auto; background: #000; outline: none; }
+  canvas.control { cursor: crosshair; box-shadow: 0 0 0 2px var(--accent) inset; }
+  #err { color: #f87171; padding: 0 8px 6px; }
+</style>
+</head>
+<body>
+<header>
+  <strong>Sandbox desktop</strong>
+  <span id="status">connecting…</span>
+  <span class="grow"></span>
+  <span id="stats"></span>
+  <button id="ctl" aria-pressed="false" disabled title="Send your mouse and keyboard to the sandbox">Take control</button>
+  <button id="fs" title="Fullscreen">⛶</button>
+</header>
+<div id="err" hidden></div>
+<div id="wrap"><canvas id="screen" tabindex="0" width="1280" height="800" aria-label="Remote desktop"></canvas></div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const canvas = $("screen"), ctx2d = canvas.getContext("2d");
+const embedded = window.parent !== window;
+const state = { ws: null, w: 1280, h: 800, allowed: false, control: false, frames: 0, bytes: 0, wantControl: false };
+
+function setStatus(text, live) { $("status").textContent = text; $("status").classList.toggle("live", !!live); }
+function showError(text) { $("err").hidden = !text; $("err").textContent = text || ""; }
+
+// ---- Ticket sources -------------------------------------------------------
+// Standalone: exchange the bearer token (kept in the URL fragment, never sent
+// in a URL) for a single-use ticket. MCP App: the host calls desktop_view and
+// the ticket arrives in the tool result _meta.
+const META_KEY = "dev.kagent/desktop";
+async function standaloneTicket() {
+  const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+  const r = await fetch("/ticket", { method: "POST", headers: token ? { Authorization: "Bearer " + token } : {} });
+  if (!r.ok) throw new Error("ticket request failed: " + r.status);
+  const t = await r.json();
+  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
+  return { wsUrl: scheme + location.host + "/ws/screen", ticket: t.ticket };
+}
+function ticketFromToolResult(result) {
+  const m = result && result._meta && result._meta[META_KEY];
+  if (!m || !m.wsUrl || !m.ticket) throw new Error("tool result has no desktop ticket");
+  return m;
+}
+
+// ---- Screen stream --------------------------------------------------------
+function connect(t) {
+  const ws = new WebSocket(t.wsUrl + "?ticket=" + encodeURIComponent(t.ticket));
+  ws.binaryType = "blob";
+  state.ws = ws;
+  let drawing = false, pending = null;
+  ws.onopen = () => { setStatus("live", true); showError(""); };
+  ws.onmessage = async (ev) => {
+    if (typeof ev.data === "string") {
+      const hello = JSON.parse(ev.data);
+      state.w = canvas.width = hello.w; state.h = canvas.height = hello.h;
+      state.allowed = !!hello.control;
+      $("ctl").disabled = !state.allowed;
+      setControl(state.allowed && state.wantControl);
+      notifySize();
+      return;
+    }
+    state.frames++; state.bytes += ev.data.size;
+    pending = ev.data;
+    if (drawing) return;
+    drawing = true;
+    while (pending) {
+      const blob = pending; pending = null;
+      try { const bmp = await createImageBitmap(blob); ctx2d.drawImage(bmp, 0, 0); bmp.close(); } catch (_) {}
+    }
+    drawing = false;
+  };
+  ws.onclose = (ev) => {
+    if (state.ws !== ws) return;
+    state.ws = null;
+    setControl(false);
+    setStatus("disconnected" + (ev.reason ? ": " + ev.reason : "") + " — reconnecting…");
+    setTimeout(reconnect, 2000);
+  };
+}
+async function reconnect() {
+  try { connect(embedded ? ticketFromToolResult(await app.callTool({ control: state.wantControl })) : await standaloneTicket()); }
+  catch (e) { showError(String(e.message || e)); setTimeout(reconnect, 5000); }
+}
+setInterval(() => {
+  $("stats").textContent = state.ws ? `${state.frames} fps · ${Math.round(state.bytes / 1024)} KB/s` : "";
+  state.frames = 0; state.bytes = 0;
+}, 1000);
+
+// ---- Input (only when the user explicitly takes control) -----------------
+function send(ev) { if (state.control && state.ws && state.ws.readyState === 1) state.ws.send(JSON.stringify(ev)); }
+function setControl(on) {
+  state.control = on;
+  $("ctl").setAttribute("aria-pressed", String(on));
+  $("ctl").textContent = on ? "Release control" : "Take control";
+  canvas.classList.toggle("control", on);
+  if (on) canvas.focus();
+}
+$("ctl").onclick = () => { state.wantControl = !state.control; setControl(state.allowed && state.wantControl); };
+$("fs").onclick = () => (document.fullscreenElement ? document.exitFullscreen() : $("wrap").requestFullscreen()).catch(() => {});
+
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: Math.round((e.clientX - r.left) * state.w / r.width), y: Math.round((e.clientY - r.top) * state.h / r.height) };
+}
+let moveQueued = null;
+canvas.addEventListener("mousemove", (e) => {
+  if (!state.control) return;
+  const first = !moveQueued; moveQueued = pos(e);
+  if (first) requestAnimationFrame(() => { send({ t: "move", ...moveQueued }); moveQueued = null; });
+});
+const BUTTON = { 0: 1, 1: 2, 2: 3 };
+canvas.addEventListener("mousedown", (e) => { if (state.control && BUTTON[e.button]) { e.preventDefault(); canvas.focus(); send({ t: "button", b: BUTTON[e.button], down: true, ...pos(e) }); } });
+canvas.addEventListener("mouseup", (e) => { if (state.control && BUTTON[e.button]) { e.preventDefault(); send({ t: "button", b: BUTTON[e.button], down: false, ...pos(e) }); } });
+canvas.addEventListener("contextmenu", (e) => { if (state.control) e.preventDefault(); });
+canvas.addEventListener("wheel", (e) => { if (state.control) { e.preventDefault(); send({ t: "wheel", dy: Math.sign(e.deltaY) }); } }, { passive: false });
+
+// X11 keysyms: named keys, Latin-1 by code point, other Unicode as 0x01000000|cp.
+const NAMED = { Enter: 0xff0d, Backspace: 0xff08, Tab: 0xff09, Escape: 0xff1b, Delete: 0xffff, Insert: 0xff63,
+  Home: 0xff50, ArrowLeft: 0xff51, ArrowUp: 0xff52, ArrowRight: 0xff53, ArrowDown: 0xff54, PageUp: 0xff55,
+  PageDown: 0xff56, End: 0xff57, Shift: 0xffe1, Control: 0xffe3, Alt: 0xffe9, Meta: 0xffeb, CapsLock: 0xffe5 };
+function keysym(key) {
+  if (NAMED[key]) return NAMED[key];
+  const f = /^F([1-9]|1[0-2])$/.exec(key); if (f) return 0xffbd + Number(f[1]);
+  const chars = [...key]; if (chars.length !== 1) return 0;
+  const cp = chars[0].codePointAt(0);
+  return cp < 0x100 ? cp : (0x01000000 | cp);
+}
+const down = new Map(); // KeyboardEvent.code -> keysym pressed, so release matches press
+canvas.addEventListener("keydown", (e) => {
+  if (!state.control) return;
+  const k = keysym(e.key); if (!k) return;
+  e.preventDefault(); down.set(e.code, k); send({ t: "key", keysym: k, down: true });
+});
+canvas.addEventListener("keyup", (e) => {
+  if (!state.control) return;
+  const k = down.get(e.code) || keysym(e.key); if (!k) return;
+  e.preventDefault(); down.delete(e.code); send({ t: "key", keysym: k, down: false });
+});
+canvas.addEventListener("blur", () => { for (const k of down.values()) send({ t: "key", keysym: k, down: false }); down.clear(); });
+
+// ---- MCP App (SEP-1865) view side: JSON-RPC over postMessage --------------
+const app = {
+  nextId: 1, waiting: new Map(), toolArgs: {},
+  request(method, params) {
+    const id = this.nextId++;
+    window.parent.postMessage({ jsonrpc: "2.0", id, method, params }, "*");
+    return new Promise((resolve, reject) => this.waiting.set(id, { resolve, reject }));
+  },
+  notify(method, params) { window.parent.postMessage({ jsonrpc: "2.0", method, params }, "*"); },
+  callTool(args) { return this.request("tools/call", { name: "desktop_view", arguments: args }); },
+  onMessage(ev) {
+    if (ev.source !== window.parent) return;
+    const m = ev.data || {};
+    if (m.id !== undefined && !m.method && this.waiting.has(m.id)) {
+      const w = this.waiting.get(m.id); this.waiting.delete(m.id);
+      m.error ? w.reject(new Error(m.error.message)) : w.resolve(m.result);
+      return;
+    }
+    switch (m.method) {
+      case "ui/notifications/tool-input": this.toolArgs = (m.params && m.params.arguments) || {}; state.wantControl = !!this.toolArgs.control; break;
+      case "ui/notifications/tool-result":
+        try { connect(ticketFromToolResult(m.params)); } catch (e) { showError(e.message); }
+        break;
+      case "ui/notifications/tool-cancelled": setStatus("cancelled"); break;
+      case "ui/resource-teardown":
+        if (state.ws) { const ws = state.ws; state.ws = null; ws.close(); }
+        window.parent.postMessage({ jsonrpc: "2.0", id: m.id, result: {} }, "*");
+        break;
+      case "ping": window.parent.postMessage({ jsonrpc: "2.0", id: m.id, result: {} }, "*"); break;
+    }
+  },
+};
+function notifySize() {
+  if (embedded) app.notify("ui/notifications/size-changed", { width: document.documentElement.scrollWidth, height: document.documentElement.scrollHeight });
+}
+
+if (embedded) {
+  window.addEventListener("message", (e) => app.onMessage(e));
+  app.request("ui/initialize", {
+    protocolVersion: "2026-01-26",
+    appInfo: { name: "desktop-gw viewer", version: "0.1.0" },
+    appCapabilities: { availableDisplayModes: ["inline", "fullscreen"] },
+  }).then(() => { app.notify("ui/notifications/initialized", {}); setStatus("waiting for tool result…"); notifySize(); })
+    .catch((e) => showError("MCP App handshake failed: " + e.message));
+  new ResizeObserver(notifySize).observe(document.body);
+} else {
+  reconnect();
+}
+</script>
+</body>
+</html>

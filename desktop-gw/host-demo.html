@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MCP Apps host demo · desktop-gw</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #0b0b0c; color: #ddd; font: 13px system-ui, sans-serif; display: grid; grid-template-columns: 360px 1fr; height: 100vh; }
+  aside { border-right: 1px solid #333; padding: 10px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+  main { padding: 10px; overflow: auto; }
+  h1 { font-size: 14px; margin: 0 0 4px; }
+  select, textarea, button { font: inherit; width: 100%; background: #18181b; color: #ddd; border: 1px solid #444; border-radius: 6px; padding: 5px; }
+  textarea { height: 90px; font-family: ui-monospace, monospace; }
+  button { cursor: pointer; }
+  .row { display: flex; gap: 6px; }
+  #log { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre-wrap; color: #aaa; flex: 1; overflow: auto; border-top: 1px solid #333; padding-top: 6px; }
+  #log img { max-width: 100%; display: block; margin: 4px 0; border: 1px solid #333; }
+  iframe { width: 100%; border: 1px solid #333; border-radius: 8px; height: 560px; background: #111; }
+  .hint { color: #888; }
+</style>
+</head>
+<body>
+<aside>
+  <h1>MCP host (agent side)</h1>
+  <div class="hint" id="info">connecting…</div>
+  <select id="tool"></select>
+  <textarea id="args">{}</textarea>
+  <button id="call">tools/call</button>
+  <div class="row">
+    <button id="view">desktop_view (watch)</button>
+    <button id="viewctl">desktop_view (control)</button>
+  </div>
+  <div id="log"></div>
+</aside>
+<main>
+  <div class="hint">The view below is the <code>ui://desktop-gw/viewer</code> MCP App, rendered in a sandboxed iframe with the CSP from its resource metadata.</div>
+  <div id="slot"></div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
+let sessionId = "", nextId = 1, tools = [];
+
+function log(text, images) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  for (const img of images || []) { const el = document.createElement("img"); el.src = img; div.appendChild(el); }
+  $("log").prepend(div);
+}
+
+// ---- MCP client over Streamable HTTP (JSON response mode) ----------------
+async function mcp(method, params, notification) {
+  const msg = { jsonrpc: "2.0", method, params };
+  if (!notification) msg.id = nextId++;
+  const headers = { "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
+  if (token) headers.Authorization = "Bearer " + token;
+  if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+  const r = await fetch("/mcp", { method: "POST", headers, body: JSON.stringify(msg) });
+  sessionId = r.headers.get("Mcp-Session-Id") || sessionId;
+  if (notification) return null;
+  if (!r.ok) throw new Error(method + ": HTTP " + r.status + " " + (await r.text()));
+  const body = await r.json();
+  if (body.error) throw new Error(method + ": " + body.error.message);
+  return body.result;
+}
+
+function showResult(name, res) {
+  const texts = [], images = [];
+  for (const c of res.content || []) {
+    if (c.type === "text") texts.push(c.text);
+    if (c.type === "image") images.push("data:" + c.mimeType + ";base64," + c.data);
+  }
+  log(`← ${name}${res.isError ? " (error)" : ""}: ${texts.join("\n").slice(0, 2000)}`, images);
+}
+
+async function start() {
+  const init = await mcp("initialize", {
+    protocolVersion: "2025-06-18",
+    capabilities: { extensions: { "io.modelcontextprotocol/ui": { mimeTypes: ["text/html;profile=mcp-app"] } } },
+    clientInfo: { name: "desktop-gw host demo", version: "0.1.0" },
+  });
+  await mcp("notifications/initialized", {}, true);
+  tools = (await mcp("tools/list", {})).tools || [];
+  $("info").textContent = `${init.serverInfo?.name || "server"} ${init.serverInfo?.version || ""} · ${tools.length} tools · session ${sessionId.slice(0, 8)}`;
+  $("tool").innerHTML = "";
+  for (const t of tools) {
+    if (t._meta?.ui?.visibility && !t._meta.ui.visibility.includes("model")) continue;
+    const o = document.createElement("option"); o.value = o.textContent = t.name; $("tool").appendChild(o);
+  }
+}
+
+$("call").onclick = async () => {
+  const name = $("tool").value;
+  let args; try { args = JSON.parse($("args").value || "{}"); } catch (e) { return log("bad JSON args: " + e.message); }
+  log(`→ ${name} ${JSON.stringify(args)}`);
+  try {
+    const tool = tools.find((t) => t.name === name);
+    if (tool?._meta?.ui?.resourceUri) return openView(tool, args);
+    showResult(name, await mcp("tools/call", { name, arguments: args }));
+  } catch (e) { log("✗ " + e.message); }
+};
+$("view").onclick = () => openView(tools.find((t) => t.name === "desktop_view"), { control: false }).catch((e) => log("✗ " + e.message));
+$("viewctl").onclick = () => openView(tools.find((t) => t.name === "desktop_view"), { control: true }).catch((e) => log("✗ " + e.message));
+
+// ---- MCP Apps host side --------------------------------------------------
+let current = null;
+async function openView(tool, args) {
+  if (!tool) throw new Error("server did not list desktop_view (MCP Apps not negotiated?)");
+  if (current) await teardown("replaced");
+  const uri = tool._meta.ui.resourceUri;
+  const [result, resource] = await Promise.all([
+    mcp("tools/call", { name: tool.name, arguments: args }),
+    mcp("resources/read", { uri }),
+  ]);
+  showResult(tool.name, result);
+  const content = resource.contents[0];
+  const csp = content._meta?.ui?.csp || {};
+  const policy = ["default-src 'none'", "script-src 'unsafe-inline'", "style-src 'unsafe-inline'", "img-src data: blob:",
+    "connect-src " + ((csp.connectDomains || []).join(" ") || "'none'")].join("; ");
+  const html = content.text.replace("<head>", `<head><meta http-equiv="Content-Security-Policy" content="${policy}">`);
+  const frame = document.createElement("iframe");
+  frame.sandbox = "allow-scripts";
+  frame.allow = "fullscreen";
+  frame.srcdoc = html;
+  $("slot").replaceChildren(frame);
+  current = { frame, tool, args, result, initialized: false, pending: new Map() };
+  log(`view ${uri} loaded, CSP connect-src: ${(csp.connectDomains || []).join(" ")}`);
+}
+
+function toView(msg) { current?.frame.contentWindow?.postMessage(msg, "*"); }
+function teardown(reason) {
+  return new Promise((resolve) => {
+    const id = "teardown-" + Date.now();
+    current.pending.set(id, resolve);
+    toView({ jsonrpc: "2.0", id, method: "ui/resource-teardown", params: { reason } });
+    setTimeout(resolve, 500);
+  }).then(() => { current = null; });
+}
+
+window.addEventListener("message", async (ev) => {
+  if (!current || ev.source !== current.frame.contentWindow) return;
+  const m = ev.data || {};
+  if (m.id !== undefined && !m.method) { current.pending.get(m.id)?.(m.result); return; }
+  const reply = (result, error) => toView(error ? { jsonrpc: "2.0", id: m.id, error } : { jsonrpc: "2.0", id: m.id, result });
+  switch (m.method) {
+    case "ui/initialize":
+      return reply({
+        protocolVersion: "2026-01-26",
+        hostInfo: { name: "desktop-gw host demo", version: "0.1.0" },
+        hostCapabilities: { serverTools: {} },
+        hostContext: { theme: "dark", displayMode: "inline", availableDisplayModes: ["inline"], toolInfo: { tool: current.tool } },
+      });
+    case "ui/notifications/initialized":
+      current.initialized = true;
+      toView({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: current.args } });
+      toView({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: current.result });
+      return;
+    case "ui/notifications/size-changed":
+      if (m.params?.height) current.frame.style.height = Math.min(Math.max(m.params.height, 200), 2000) + "px";
+      return;
+    case "tools/call": {
+      const t = tools.find((x) => x.name === m.params?.name);
+      if (!t || !(t._meta?.ui?.visibility || ["model", "app"]).includes("app")) return reply(null, { code: -32602, message: "tool not available to apps" });
+      try { return reply(await mcp("tools/call", m.params)); } catch (e) { return reply(null, { code: -32603, message: e.message }); }
+    }
+    case "ping": return reply({});
+    default: if (m.id !== undefined) reply(null, { code: -32601, message: "unsupported: " + m.method });
+  }
+});
+
+start().catch((e) => { $("info").textContent = "✗ " + e.message; });
+</script>
+</body>
+</html>
