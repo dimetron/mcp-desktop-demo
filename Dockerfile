@@ -57,12 +57,17 @@ ARG CDM_VERSION=1.12.0
 RUN npm install --omit=dev --no-audit --no-fund --prefix /opt/cdm "chrome-devtools-mcp@${CDM_VERSION}" \
     && npm cache clean --force
 
+# Tool definitions and screenshots are paid for in model context on every turn,
+# so the image drops the memory, performance and emulation tools (32 -> 26
+# tools, ~30 KB -> ~23 KB of tools/list) and returns JPEG screenshots at most
+# 1024 px wide. Set GW_MCP_TOOLS to narrow further. Coordinate clicks (click_at)
+# are off without --experimental-vision, so downscaling can't skew them.
 FROM base AS cdm
 COPY --from=cdm-build /usr/local/bin/node /usr/local/bin/node
 COPY --from=cdm-build /opt/cdm /opt/cdm
 ENV CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS=1 \
     CHROME_DEVTOOLS_MCP_NO_UPDATE_CHECKS=1 \
-    GW_MCP_CMD="exec node /opt/cdm/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js --browser-url=http://127.0.0.1:9222 --no-usage-statistics --no-performance-crux"
+    GW_MCP_CMD="exec node /opt/cdm/node_modules/chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js --browser-url=http://127.0.0.1:9222 --no-usage-statistics --no-performance-crux --category-memory=false --category-performance=false --category-emulation=false --screenshot-format=jpeg --screenshot-quality=60 --screenshot-max-width=1024"
 
 FROM alpine:3.22 AS cua-fetch
 ARG TARGETARCH

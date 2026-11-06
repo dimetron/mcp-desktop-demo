@@ -140,7 +140,12 @@ Negative and accepted:
 - Full-frame `GetImage` costs CPU per frame (no XShm, which gVisor doesn't
   share).
 - `cua-driver` exposes powerful tools (`run_script`, `install_extension`). The
-  sandbox is the boundary, but an allowlist in the bridge would narrow it.
+  sandbox is the boundary. `GW_MCP_TOOLS` narrows it: the bridge hides other
+  tools from `tools/list` and rejects calls to them. It is unset by default.
+- Tool definitions and screenshots cost model context on every turn, so the
+  `cdm` image turns off the tool categories an agent rarely needs and sends
+  smaller JPEG screenshots. The bridge logs one line per `tools/call` (tool,
+  latency, response bytes, image count and bytes) for tuning from traces.
 - No clipboard or file transfer in the viewer. Agents use MCP or the sandbox
   file API.
 

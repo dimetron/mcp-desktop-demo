@@ -32,6 +32,7 @@ type config struct {
 	token    string
 	display  string
 	mcpCmd   string
+	mcpTools map[string]bool
 	fps      int
 	quality  int
 	viewOnly bool
@@ -64,6 +65,7 @@ func loadConfig() (config, error) {
 		token:    os.Getenv("GW_TOKEN"),
 		display:  envOr("DISPLAY", ":0"),
 		mcpCmd:   os.Getenv("GW_MCP_CMD"),
+		mcpTools: parseToolList(os.Getenv("GW_MCP_TOOLS")),
 		fps:      envInt("GW_FPS", 8),
 		quality:  envInt("GW_JPEG_QUALITY", 70),
 		viewOnly: os.Getenv("GW_VIEW_ONLY") == "1",
@@ -115,6 +117,10 @@ func run(cfg config) error {
 	if cfg.mcpCmd != "" {
 		b := newBridge(cfg.mcpCmd, 4, 30*time.Minute, 120*time.Second)
 		b.app = &viewerApp{tickets: tickets, html: htmlClient, viewOnly: cfg.viewOnly, trustForwarded: cfg.clientCA != ""}
+		b.allow = cfg.mcpTools
+		if b.allow != nil {
+			log.Printf("mcp: tool allowlist (%d): %s", len(b.allow), os.Getenv("GW_MCP_TOOLS"))
+		}
 		defer b.closeAll()
 		mux.Handle("/mcp", requireToken(cfg.token, b))
 	}

@@ -38,8 +38,15 @@ func TestHelperProcess(t *testing.T) {
 			result = map[string]any{"protocolVersion": "2025-06-18", "capabilities": map[string]any{"tools": map[string]any{}},
 				"serverInfo": map[string]any{"name": "fake", "version": "1"}}
 		case "tools/list":
-			result = map[string]any{"tools": []any{map[string]any{"name": "echo", "inputSchema": map[string]any{"type": "object"}}}}
+			result = map[string]any{"tools": []any{
+				map[string]any{"name": "echo", "inputSchema": map[string]any{"type": "object"}},
+				map[string]any{"name": "shot", "inputSchema": map[string]any{"type": "object"}},
+			}, "nextCursor": "page2"}
 		case "tools/call":
+			if toolCallName(m.Params) == "shot" {
+				result = map[string]any{"content": []any{map[string]any{"type": "image", "mimeType": "image/jpeg", "data": "AAAAAAAA"}}}
+				break
+			}
 			result = map[string]any{"content": []any{map[string]any{"type": "text", "text": string(m.Params)}}}
 		case "exit":
 			os.Exit(0)
@@ -130,7 +137,7 @@ func TestBridgeMCPAppsFlow(t *testing.T) {
 	for _, tool := range result(t, list)["tools"].([]any) {
 		names = append(names, tool.(map[string]any)["name"].(string))
 	}
-	if strings.Join(names, ",") != "echo,"+viewerTool {
+	if strings.Join(names, ",") != "echo,shot,"+viewerTool {
 		t.Errorf("tools = %v", names)
 	}
 
@@ -171,7 +178,7 @@ func TestBridgeWithoutAppsHostHidesViewer(t *testing.T) {
 	c := &mcpClient{t: t, url: srv.URL}
 	c.post("initialize", map[string]any{"capabilities": map[string]any{}}, false)
 	_, list := c.post("tools/list", map[string]any{}, false)
-	if tools := result(t, list)["tools"].([]any); len(tools) != 1 {
+	if tools := result(t, list)["tools"].([]any); len(tools) != 2 {
 		t.Errorf("viewer tool advertised to a host without MCP Apps: %v", tools)
 	}
 	_, call := c.post("tools/call", map[string]any{"name": viewerTool}, false)
@@ -243,6 +250,60 @@ func TestBridgeProtocolErrors(t *testing.T) {
 	}
 	if b.lookup(c2.sid) != nil {
 		t.Error("dead session was not removed")
+	}
+}
+
+func TestBridgeToolAllowlist(t *testing.T) {
+	srv, b, _ := newTestServer(t)
+	b.allow = parseToolList(" echo , ")
+	c := &mcpClient{t: t, url: srv.URL}
+	c.post("initialize", appsCaps, false)
+
+	_, list := c.post("tools/list", map[string]any{}, false)
+	var names []string
+	for _, tool := range result(t, list)["tools"].([]any) {
+		names = append(names, tool.(map[string]any)["name"].(string))
+	}
+	if strings.Join(names, ",") != "echo,"+viewerTool {
+		t.Errorf("tools = %v", names)
+	}
+	if result(t, list)["nextCursor"] != "page2" {
+		t.Errorf("filtering dropped nextCursor: %v", list)
+	}
+
+	_, call := c.post("tools/call", map[string]any{"name": "shot"}, false)
+	e, _ := call["error"].(map[string]any)
+	if e == nil || e["code"] != float64(-32602) {
+		t.Errorf("disallowed call = %v", call)
+	}
+	_, call = c.post("tools/call", map[string]any{"name": "echo", "arguments": map[string]any{}}, false)
+	if call["error"] != nil {
+		t.Errorf("allowed call = %v", call)
+	}
+	// The MCP App tool is the gateway's own and is not subject to the list.
+	_, call = c.post("tools/call", map[string]any{"name": viewerTool}, false)
+	if call["error"] != nil {
+		t.Errorf("desktop_view = %v", call)
+	}
+}
+
+func TestParseToolList(t *testing.T) {
+	if parseToolList(" , ") != nil {
+		t.Error("blank list should allow every tool")
+	}
+	if got := parseToolList("a, b,,c "); len(got) != 3 || !got["b"] || !got["c"] {
+		t.Errorf("got %v", got)
+	}
+}
+
+func TestSummarizeResult(t *testing.T) {
+	raw := []byte(`{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[
+		{"type":"text","text":"hi"},{"type":"image","data":"AAAAAAAA"},{"type":"image","data":"AAAA"}]}}`)
+	if st := summarizeResult(raw); st.images != 2 || st.imageBytes != 9 || !st.isError {
+		t.Errorf("stats = %+v", st)
+	}
+	if st := summarizeResult([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-1}}`)); !st.isError {
+		t.Errorf("rpc error not counted: %+v", st)
 	}
 }
 

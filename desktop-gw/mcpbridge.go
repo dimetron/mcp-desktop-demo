@@ -57,6 +57,8 @@ type bridge struct {
 	idle        time.Duration
 	timeout     time.Duration
 	app         *viewerApp
+	// allow limits the child's tools (GW_MCP_TOOLS); nil allows all.
+	allow map[string]bool
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -140,10 +142,33 @@ func (b *bridge) post(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	tool := ""
+	if msg.Method == "tools/call" {
+		tool = toolCallName(msg.Params)
+		if b.allow != nil && !b.allow[tool] {
+			log.Printf("mcp: call session=%s tool=%q rejected (not in GW_MCP_TOOLS)", s.short(), tool)
+			writeJSON(w, rpcError(msg.ID, -32602, fmt.Sprintf("tool %q is not enabled on this gateway", tool)))
+			return
+		}
+	}
+	start := time.Now()
 	resp, err := s.call(r, msg.ID, body, b.timeout)
 	if err != nil {
+		if tool != "" {
+			log.Printf("mcp: call session=%s tool=%q ms=%d failed: %v", s.short(), tool, time.Since(start).Milliseconds(), err)
+		}
 		writeJSON(w, rpcError(msg.ID, -32603, err.Error()))
 		return
+	}
+	switch msg.Method {
+	case "tools/call":
+		st := summarizeResult(resp)
+		log.Printf("mcp: call session=%s tool=%q ms=%d bytes=%d images=%d image_bytes=%d error=%t",
+			s.short(), tool, time.Since(start).Milliseconds(), len(resp), st.images, st.imageBytes, st.isError)
+	case "tools/list":
+		var n int
+		resp, n = filterTools(resp, b.allow)
+		log.Printf("mcp: tools/list session=%s tools=%d bytes=%d", s.short(), n, len(resp))
 	}
 	if b.app != nil && s.uiHost {
 		resp = b.app.augment(msg, resp)
@@ -287,6 +312,9 @@ func startSession(command string) (*session, error) {
 	go s.readLoop(stdout)
 	return s, nil
 }
+
+// short is a log-safe session prefix; the full ID authorizes requests.
+func (s *session) short() string { return s.id[:8] }
 
 func (s *session) touch() {
 	s.mu.Lock()

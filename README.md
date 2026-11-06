@@ -189,7 +189,7 @@ an artifact and attached to the GitHub release for tags.
 | --- | --- | --- |
 | `x11` | Ubuntu 24.04, Xvfb, openbox, `desktop-gw` | none (viewer only) |
 | `base` | Chrome (amd64) or Chromium (arm64) | none |
-| `cdm` | Node 22, chrome-devtools-mcp 1.12.0 | `GW_MCP_CMD` runs chrome-devtools-mcp against `127.0.0.1:9222` |
+| `cdm` | Node 22, chrome-devtools-mcp 1.12.0 | `GW_MCP_CMD` runs chrome-devtools-mcp against `127.0.0.1:9222`, without the memory, performance and emulation tools, with JPEG screenshots up to 1024 px wide |
 | `cua` | cua-driver 0.38.0 (checksum-verified, stripped) | `GW_MCP_CMD="exec cua-driver mcp"` |
 
 ## Configuration
@@ -208,6 +208,7 @@ an artifact and attached to the GitHub release for tags.
 | `GW_LISTEN` | `127.0.0.1:8080` (images: `0.0.0.0:8080`) | Listen address. |
 | `GW_TOKEN` / `GW_TOKEN_FILE` | generated `/data/gw-token` | Bearer token. Required for non-loopback binds. |
 | `GW_MCP_CMD` | per image | Shell command for the stdio MCP server; empty disables `/mcp`. |
+| `GW_MCP_TOOLS` | unset (all tools) | Comma-separated tool allowlist. Other tools are hidden from `tools/list` and their calls fail with `-32602`. `desktop_view` is always kept. |
 | `GW_FPS` | `8` | Capture rate, 1–30. |
 | `GW_JPEG_QUALITY` | `70` | JPEG quality, 10–95. |
 | `GW_VIEW_ONLY` | unset | `1` disables all input injection. |
