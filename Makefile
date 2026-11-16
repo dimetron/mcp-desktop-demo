@@ -35,8 +35,10 @@ help: ## Show this help.
 ##@ Develop
 
 .PHONY: test
-test: ## go vet and race tests for desktop-gw.
+test: ## go vet and race tests for every Go module.
 	cd desktop-gw && go vet ./... && go test -race ./...
+	cd agent-computer-proxy && go vet ./... && go test -race ./...
+	cd cursor-theme && go vet ./... && go build ./...
 
 .PHONY: lint
 lint: ## shellcheck scripts, actionlint workflows, validate rendered manifests.
