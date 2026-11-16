@@ -69,8 +69,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Render kagent manifests
         run: |
-          image=${IMAGE,,}
-          make manifests IMAGE="$image" IMAGE_TAG="cua-${GITHUB_SHA::7}"
+          make manifests IMAGE="${IMAGE,,}" IMAGE_TAG="cua-${GITHUB_SHA::7}"
           grep -n 'image:' out/deploy.yaml >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
