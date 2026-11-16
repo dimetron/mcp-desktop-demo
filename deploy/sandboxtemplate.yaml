@@ -22,7 +22,7 @@ spec:
     - name: GW_LISTEN
       value: 127.0.0.1:8080
     - name: GW_MCP_CMD
-      value: exec cua-driver mcp
+      value: exec cua-driver mcp --grant existing-profile
     - name: CUA_DRIVER_RS_TELEMETRY_ENABLED
       value: "0"
     - name: CUA_TELEMETRY_ENABLED

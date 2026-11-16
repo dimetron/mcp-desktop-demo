@@ -146,8 +146,11 @@ Negative and accepted:
   `cdm` image turns off the tool categories an agent rarely needs and sends
   smaller JPEG screenshots. The bridge logs one line per `tools/call` (tool,
   latency, response bytes, image count and bytes) for tuning from traces.
-- No clipboard or file transfer in the viewer. Agents use MCP or the sandbox
-  file API.
+- No file transfer in the viewer. Clipboard text moves only on control
+  sockets and only on request (`clip-paste`, `clip-copy`, `type-secret`,
+  `clipboard.go`, pi-bot spec 104); the gateway logs sizes, never text, and
+  `type-secret` types without touching the clipboard. Agents use MCP or the
+  sandbox file API.
 
 ## Security model
 

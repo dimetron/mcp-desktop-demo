@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
 	"github.com/jezek/xgb"
@@ -26,6 +27,11 @@ type display struct {
 	root          xproto.Window
 	width, height int
 	keymap        map[uint32]keyBinding
+
+	// The raw mapping, for typing characters the layout lacks (clipboard.go).
+	minCode xproto.Keycode
+	perCode int
+	syms    []xproto.Keysym
 }
 
 func openDisplay(name string) (*display, error) {
@@ -54,11 +60,12 @@ func openDisplay(name string) (*display, error) {
 		return nil, fmt.Errorf("keyboard mapping: %w", err)
 	}
 	return &display{
-		conn:   c,
-		root:   scr.Root,
-		width:  int(scr.WidthInPixels),
-		height: int(scr.HeightInPixels),
-		keymap: buildKeymap(setup.MinKeycode, int(km.KeysymsPerKeycode), km.Keysyms),
+		conn:    c,
+		root:    scr.Root,
+		width:   int(scr.WidthInPixels),
+		height:  int(scr.HeightInPixels),
+		keymap:  buildKeymap(setup.MinKeycode, int(km.KeysymsPerKeycode), km.Keysyms),
+		minCode: setup.MinKeycode, perCode: int(km.KeysymsPerKeycode), syms: km.Keysyms,
 	}, nil
 }
 
@@ -210,7 +217,7 @@ type screenHello struct {
 // send the bearer token. The origin check is disabled because no ambient
 // credential (cookie) authorizes the socket, and MCP App views run in a
 // sandboxed iframe whose origin is opaque.
-func newScreenHandler(d *display, cfg config, tickets *ticketStore) http.Handler {
+func newScreenHandler(d *display, cb *clipboard, cfg config, tickets *ticketStore) http.Handler {
 	b := newBroadcaster(jpegSource(d, cfg.quality), time.Second/time.Duration(cfg.fps))
 	want := []byte(cfg.token)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -234,11 +241,14 @@ func newScreenHandler(d *display, cfg config, tickets *ticketStore) http.Handler
 		}
 		defer c.CloseNow()
 		c.SetReadLimit(4096)
-		streamScreen(r.Context(), c, d, b, control)
+		if control && cb != nil {
+			c.SetReadLimit(2 << 20) // clipboard text, JSON-escaped
+		}
+		streamScreen(r.Context(), c, d, cb, b, control)
 	})
 }
 
-func streamScreen(ctx context.Context, c *websocket.Conn, d *display, b *broadcaster, control bool) {
+func streamScreen(ctx context.Context, c *websocket.Conn, d *display, cb *clipboard, b *broadcaster, control bool) {
 	hello, _ := json.Marshal(screenHello{Width: d.width, Height: d.height, Control: control})
 	if err := writeWithTimeout(ctx, c, websocket.MessageText, hello); err != nil {
 		return
@@ -255,9 +265,16 @@ func streamScreen(ctx context.Context, c *websocket.Conn, d *display, b *broadca
 					return
 				}
 				var ev inputEvent
-				if json.Unmarshal(msg, &ev) == nil {
-					d.inject(ev)
+				if json.Unmarshal(msg, &ev) != nil {
+					continue
 				}
+				if reply := handleClip(cb, ev); reply != nil {
+					if writeWithTimeout(ctx, c, websocket.MessageText, reply) != nil {
+						return
+					}
+					continue
+				}
+				d.inject(ev)
 			}
 		}()
 	} else {
@@ -275,6 +292,47 @@ func streamScreen(ctx context.Context, c *websocket.Conn, d *display, b *broadca
 			}
 		}
 	}
+}
+
+type clipReply struct {
+	T     string `json:"t"`
+	ID    int    `json:"id,omitempty"`
+	Op    string `json:"op"`
+	Text  string `json:"text,omitempty"`
+	N     int    `json:"n,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// handleClip runs a clipboard message and returns the reply frame, or nil when
+// ev is ordinary input. It is only called on control sockets, so a watch-only
+// ticket never reaches the clipboard. A secret's reply carries its length only.
+func handleClip(cb *clipboard, ev inputEvent) []byte {
+	var r clipReply
+	switch ev.T {
+	case "clip-paste", "clip-copy", "type-secret":
+		r = clipReply{T: "clip", ID: ev.ID, Op: ev.T}
+	default:
+		return nil
+	}
+	var err error
+	switch {
+	case cb == nil:
+		err = errors.New("this computer has no clipboard support")
+	case ev.T == "clip-paste":
+		err = cb.paste(ev.Text)
+		r.N = utf8.RuneCountInString(ev.Text)
+	case ev.T == "clip-copy":
+		r.Text, err = cb.copy()
+		r.N = utf8.RuneCountInString(r.Text)
+	case ev.T == "type-secret":
+		err = cb.typeSecret(ev.Text)
+		r.N = utf8.RuneCountInString(ev.Text)
+	}
+	if err != nil {
+		r.Error, r.N = err.Error(), 0
+	}
+	b, _ := json.Marshal(r)
+	return b
 }
 
 func writeWithTimeout(ctx context.Context, c *websocket.Conn, typ websocket.MessageType, p []byte) error {

@@ -40,6 +40,11 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            # cua-driver must be allowed to attach to the desktop's Chromium
+            # (DevTools on 127.0.0.1:9222). Without the grant, browser_prepare
+            # refuses with browser_consent_required and every browser_* tool fails.
+            - name: GW_MCP_CMD
+              value: exec cua-driver mcp --grant existing-profile
             - name: GW_TOKEN_FILE
               value: /var/run/desktop-gw/token
             - name: GEOMETRY
