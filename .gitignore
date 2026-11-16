@@ -5,6 +5,7 @@ out/
 # Go build output.
 /desktop-gw/desktop-gw
 /agent-computer-proxy/agent-computer-proxy
+/cursor-theme/cursor-theme
 
 # macOS
 .DS_Store
