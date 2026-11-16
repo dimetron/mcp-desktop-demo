@@ -1,0 +1,10 @@
+# Rendered manifests, demo certs, the gateway token and the kind kubeconfig
+# (make manifests, e2e.sh, k8s-e2e.sh).
+out/
+
+# Go build output.
+/desktop-gw/desktop-gw
+/agent-computer-proxy/agent-computer-proxy
+
+# macOS
+.DS_Store

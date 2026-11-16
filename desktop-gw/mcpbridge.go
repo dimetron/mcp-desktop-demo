@@ -59,6 +59,12 @@ type bridge struct {
 	app         *viewerApp
 	// allow limits the child's tools (GW_MCP_TOOLS); nil allows all.
 	allow map[string]bool
+	// cursorTheme (GW_CURSOR_THEME) is the installed cua-driver cursor theme
+	// each session's agent cursor gets; cua-driver selects themes per session.
+	cursorTheme string
+	// settle samples the screen to wait for it to stop changing after
+	// navigation and input tools (settle.go); nil disables waiting.
+	settle screenSampler
 
 	mu       sync.Mutex
 	sessions map[string]*session
@@ -132,6 +138,9 @@ func (b *bridge) post(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		if msg.Method == "notifications/initialized" && b.cursorTheme != "" {
+			go b.setCursorTheme(s, "")
+		}
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -151,6 +160,9 @@ func (b *bridge) post(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if tool == "start_session" && b.cursorTheme != "" {
+		body = withDefaultArg(body, "cursor_theme", b.cursorTheme)
+	}
 	start := time.Now()
 	resp, err := s.call(r, msg.ID, body, b.timeout)
 	if err != nil {
@@ -165,6 +177,15 @@ func (b *bridge) post(w http.ResponseWriter, r *http.Request) {
 		st := summarizeResult(resp)
 		log.Printf("mcp: call session=%s tool=%q ms=%d bytes=%d images=%d image_bytes=%d error=%t",
 			s.short(), tool, time.Since(start).Milliseconds(), len(resp), st.images, st.imageBytes, st.isError)
+		// A named cua-driver session (the "session" argument) gets its own
+		// cursor with the default theme: give it the gateway's theme too.
+		if name := toolCallArg(msg.Params, "session"); name != "" && b.cursorTheme != "" && s.firstUse(name) {
+			go b.setCursorTheme(s, name)
+		}
+		if limit, ok := settleLimits[tool]; ok && b.settle != nil && !st.isError {
+			waited, settled := waitSettled(b.settle, limit, time.Sleep)
+			log.Printf("mcp: settle session=%s tool=%q ms=%d settled=%t", s.short(), tool, waited.Milliseconds(), settled)
+		}
 	case "tools/list":
 		var n int
 		resp, n = filterTools(resp, b.allow)
@@ -174,6 +195,96 @@ func (b *bridge) post(w http.ResponseWriter, r *http.Request) {
 		resp = b.app.augment(msg, resp)
 	}
 	writeJSON(w, resp)
+}
+
+// setCursorTheme selects the gateway's cursor theme for a session's cursor
+// (named: a cua-driver session label; "": the MCP session's own cursor), so
+// every agent cursor looks the same without the agent asking. Reduced motion
+// keeps the mark upright (the default glide turns it along its path). For the
+// MCP session it also turns the session-name badge off.
+func (b *bridge) setCursorTheme(s *session, named string) {
+	args := map[string]any{"theme_id": b.cursorTheme, "reduced_motion": "on"}
+	if named != "" {
+		args["session"] = named
+	}
+	if err := s.internalCall("set_agent_cursor_theme", args, b.timeout); err != nil {
+		log.Printf("mcp: session=%s cursor theme %q (%s): %v", s.short(), b.cursorTheme, named, err)
+		return
+	}
+	log.Printf("mcp: session=%s cursor theme %q %s", s.short(), b.cursorTheme, named)
+	if named == "" {
+		if err := s.internalCall("set_config", map[string]any{"cursor.badges": "off"}, b.timeout); err != nil {
+			log.Printf("mcp: session=%s cursor badges off: %v", s.short(), err)
+		}
+	}
+}
+
+// internalCall runs one tool on the session's MCP server for the gateway
+// itself; the client never sees it.
+func (s *session) internalCall(tool string, args map[string]any, timeout time.Duration) error {
+	id := fmt.Sprintf("gw-%s-%d", tool, time.Now().UnixNano())
+	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "tools/call",
+		"params": map[string]any{"name": tool, "arguments": args}})
+	r, _ := http.NewRequest(http.MethodPost, "/", nil)
+	idJSON, _ := json.Marshal(id)
+	resp, err := s.call(r, idJSON, body, timeout)
+	if err == nil && (bytes.Contains(resp, []byte(`"isError":true`)) || bytes.Contains(resp, []byte(`"error":{`))) {
+		err = fmt.Errorf("%s", resp)
+	}
+	return err
+}
+
+// firstUse reports whether a cua-driver session label is new to this MCP session.
+func (s *session) firstUse(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.named == nil {
+		s.named = map[string]bool{}
+	}
+	if s.named[name] {
+		return false
+	}
+	s.named[name] = true
+	return true
+}
+
+// toolCallArg returns one string argument of a tools/call.
+func toolCallArg(params json.RawMessage, key string) string {
+	var p struct {
+		Arguments map[string]any `json:"arguments"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ""
+	}
+	v, _ := p.Arguments[key].(string)
+	return v
+}
+
+// withDefaultArg sets params.arguments[key] in a tools/call body unless the
+// caller set it.
+func withDefaultArg(body []byte, key, value string) []byte {
+	var m map[string]any
+	if json.Unmarshal(body, &m) != nil {
+		return body
+	}
+	params, _ := m["params"].(map[string]any)
+	if params == nil {
+		return body
+	}
+	args, _ := params["arguments"].(map[string]any)
+	if args == nil {
+		args = map[string]any{}
+		params["arguments"] = args
+	}
+	if _, set := args[key]; set {
+		return body
+	}
+	args[key] = value
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, b []byte) {
@@ -288,6 +399,7 @@ type session struct {
 	mu       sync.Mutex
 	pending  map[string]chan []byte
 	lastUsed time.Time
+	named    map[string]bool // cua-driver session labels already themed
 }
 
 func startSession(command string) (*session, error) {

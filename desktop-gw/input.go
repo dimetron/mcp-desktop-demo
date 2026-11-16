@@ -30,6 +30,10 @@ type inputEvent struct {
 	Down   bool   `json:"down"`
 	DY     int    `json:"dy"`
 	Keysym uint32 `json:"keysym"`
+
+	// Clipboard messages (clipboard.go).
+	Text string `json:"text,omitempty"`
+	ID   int    `json:"id,omitempty"`
 }
 
 type keyBinding struct {
@@ -103,6 +107,49 @@ func translateInput(ev inputEvent, w, h int, keymap map[uint32]keyBinding) []fak
 		return []fakeCall{{typ, byte(k.code), 0, 0}}
 	}
 	return nil
+}
+
+// key presses or releases one keycode.
+func (d *display) key(code xproto.Keycode, down bool) {
+	typ := byte(xKeyRelease)
+	if down {
+		typ = xKeyPress
+	}
+	xtest.FakeInput(d.conn, typ, byte(code), 0, d.root, 0, 0, 0)
+}
+
+// spareKeycode is the highest keycode with no keysyms, or 0.
+func (d *display) spareKeycode() xproto.Keycode {
+	if d.perCode <= 0 {
+		return 0
+	}
+	for i := len(d.syms)/d.perCode - 1; i >= 0; i-- {
+		empty := true
+		for _, s := range d.syms[i*d.perCode : (i+1)*d.perCode] {
+			if s != 0 {
+				empty = false
+				break
+			}
+		}
+		if empty {
+			return d.minCode + xproto.Keycode(i)
+		}
+	}
+	return 0
+}
+
+// remap points code at keysym ks in its first two columns (0 clears it) and
+// waits until the server has applied it.
+func (d *display) remap(code xproto.Keycode, ks uint32) {
+	syms := make([]xproto.Keysym, d.perCode)
+	if ks != 0 {
+		syms[0] = xproto.Keysym(ks)
+		if d.perCode > 1 {
+			syms[1] = xproto.Keysym(ks)
+		}
+	}
+	xproto.ChangeKeyboardMapping(d.conn, 1, code, byte(d.perCode), syms)
+	xproto.GetInputFocus(d.conn).Reply() // round trip: the change is in
 }
 
 func (d *display) inject(ev inputEvent) {

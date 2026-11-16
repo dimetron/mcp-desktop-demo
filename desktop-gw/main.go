@@ -39,6 +39,11 @@ type config struct {
 	tlsCert  string
 	tlsKey   string
 	clientCA string
+	cursor   string // GW_CURSOR_THEME: cua-driver agent cursor theme set on every MCP session
+	// Sign-ins (cookies.go): Chromium's DevTools endpoint, and the token for
+	// the proxy-only /cookies/export route (empty: the route is off).
+	cdpURL      string
+	exportToken string
 }
 
 func main() {
@@ -61,18 +66,24 @@ func main() {
 
 func loadConfig() (config, error) {
 	cfg := config{
-		listen:   envOr("GW_LISTEN", "127.0.0.1:8080"),
-		token:    os.Getenv("GW_TOKEN"),
-		display:  envOr("DISPLAY", ":0"),
-		mcpCmd:   os.Getenv("GW_MCP_CMD"),
-		mcpTools: parseToolList(os.Getenv("GW_MCP_TOOLS")),
-		fps:      envInt("GW_FPS", 8),
-		quality:  envInt("GW_JPEG_QUALITY", 70),
-		viewOnly: os.Getenv("GW_VIEW_ONLY") == "1",
-		tlsCert:  os.Getenv("GW_TLS_CERT"),
-		tlsKey:   os.Getenv("GW_TLS_KEY"),
-		clientCA: os.Getenv("GW_TLS_CLIENT_CA"),
+		listen:      envOr("GW_LISTEN", "127.0.0.1:8080"),
+		token:       os.Getenv("GW_TOKEN"),
+		display:     envOr("DISPLAY", ":0"),
+		mcpCmd:      os.Getenv("GW_MCP_CMD"),
+		mcpTools:    parseToolList(os.Getenv("GW_MCP_TOOLS")),
+		cursor:      os.Getenv("GW_CURSOR_THEME"),
+		cdpURL:      envOr("GW_CDP_URL", "http://127.0.0.1:9222"),
+		exportToken: os.Getenv("GW_COOKIE_EXPORT_TOKEN"),
+		fps:         envInt("GW_FPS", 8),
+		quality:     envInt("GW_JPEG_QUALITY", 70),
+		viewOnly:    os.Getenv("GW_VIEW_ONLY") == "1",
+		tlsCert:     os.Getenv("GW_TLS_CERT"),
+		tlsKey:      os.Getenv("GW_TLS_KEY"),
+		clientCA:    os.Getenv("GW_TLS_CLIENT_CA"),
 	}
+	// The export token is only for agent-computer-proxy: keep it out of the
+	// environment the MCP server and its tools inherit.
+	os.Unsetenv("GW_COOKIE_EXPORT_TOKEN")
 	if file := os.Getenv("GW_TOKEN_FILE"); file != "" && cfg.token == "" {
 		b, err := os.ReadFile(file)
 		if err != nil {
@@ -104,6 +115,15 @@ func run(cfg config) error {
 		return err
 	}
 	defer disp.close()
+	// Clipboard and secret typing for control viewers; without it the
+	// viewer gets an error reply instead.
+	cb, err := openClipboard(cfg.display, disp)
+	if err != nil {
+		log.Printf("clipboard off: %v", err)
+		cb = nil
+	} else {
+		defer cb.close()
+	}
 
 	tickets := newTicketStore(60 * time.Second)
 	mux := http.NewServeMux()
@@ -113,11 +133,16 @@ func run(cfg config) error {
 	mux.HandleFunc("GET /host-demo", servePage(hostDemo, "'self' ws: wss:"))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
 	mux.Handle("POST /ticket", requireToken(cfg.token, ticketHandler(tickets, cfg.viewOnly)))
-	mux.Handle("GET /ws/screen", newScreenHandler(disp, cfg, tickets))
+	mux.Handle("GET /ws/screen", newScreenHandler(disp, cb, cfg, tickets))
+	mountCookies(mux, cfg)
 	if cfg.mcpCmd != "" {
 		b := newBridge(cfg.mcpCmd, 4, 30*time.Minute, 120*time.Second)
 		b.app = &viewerApp{tickets: tickets, html: htmlClient, viewOnly: cfg.viewOnly, trustForwarded: cfg.clientCA != ""}
 		b.allow = cfg.mcpTools
+		b.cursorTheme = cfg.cursor
+		if os.Getenv("GW_SETTLE") != "0" {
+			b.settle = displaySampler(disp)
+		}
 		if b.allow != nil {
 			log.Printf("mcp: tool allowlist (%d): %s", len(b.allow), os.Getenv("GW_MCP_TOOLS"))
 		}

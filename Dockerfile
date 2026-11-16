@@ -36,7 +36,7 @@ ARG TARGETARCH
 ARG GOOGLE_KEY_FPR=EB4C1BFD4F042F6DDDCCEC917721F63BD38B4796
 ARG XTRADEB_KEY_FPR=5301FA4FD93244FBC6F6149982BB6851C64F6880
 RUN set -eux; \
-    apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg fonts-liberation; \
+    apt-get update; DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl gnupg fonts-liberation libnss3-tools; \
     case "$TARGETARCH" in \
       amd64) url=https://dl.google.com/linux/linux_signing_key.pub; fpr=$GOOGLE_KEY_FPR; bin=/usr/bin/google-chrome-stable; \
              repo="deb [arch=amd64 signed-by=/usr/share/keyrings/browser.gpg] https://dl.google.com/linux/chrome/deb/ stable main"; pkg=google-chrome-stable ;; \
@@ -78,14 +78,33 @@ RUN set -eux; apk add --no-cache curl binutils; \
     case "$TARGETARCH" in arm64) a=linux-arm64; sum=$CUA_SHA256_ARM64 ;; amd64) a=linux-x86_64; sum=$CUA_SHA256_AMD64 ;; esac; \
     curl -fsSL -o /tmp/cua.tgz "https://github.com/trycua/cua/releases/download/cua-driver-rs-v${CUA_VERSION}/cua-driver-rs-${CUA_VERSION}-${a}-binary.tar.gz"; \
     echo "$sum  /tmp/cua.tgz" | sha256sum -c -; \
-    mkdir /out; tar -xzf /tmp/cua.tgz -C /out cua-driver; strip /out/cua-driver
+    mkdir /out; tar -xzf /tmp/cua.tgz -C /out cua-driver cua-cursor-theme; strip /out/cua-driver /out/cua-cursor-theme
+
+# The agent cursor: a small "+" (cursor-theme/main.go), compiled in the cua stage.
+FROM golang:1.27-alpine AS cursor-theme
+WORKDIR /src
+COPY cursor-theme/ ./
+RUN mkdir -p /out && go run . /out/plus.lottie
 
 FROM base AS cua
 USER root
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       libx11-6 libxi6 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
-COPY --from=cua-fetch /out/cua-driver /usr/local/bin/cua-driver
+COPY --from=cua-fetch /out/cua-driver /out/cua-cursor-theme /usr/local/bin/
+# Theme store baked into the image; start-desktop.sh selects the theme.
+ENV CUA_DRIVER_CURSOR_THEME_DIR=/usr/share/cua-driver/cursor-themes \
+    CURSOR_THEME=dev.pibot.cursor.plus
+COPY --from=cursor-theme /out/plus.lottie /tmp/plus.lottie
+RUN cua-driver cursor-theme build /tmp/plus.lottie --output /tmp/plus.cua-theme \
+    && cua-driver cursor-theme install /tmp/plus.cua-theme \
+    && cua-driver cursor-theme list | grep -q dev.pibot.cursor.plus \
+    && rm /tmp/plus.lottie /tmp/plus.cua-theme
+# agent-computer-proxy writes the site deny list as a Chromium managed policy
+# (URLBlocklist). The sandbox file API writes only under /data/workspace, so
+# the policy file is a link to it; /etc stays read-only for the desktop user.
+RUN mkdir -p /etc/chromium/policies/managed \
+    && ln -s /data/workspace/chromium-policy.json /etc/chromium/policies/managed/agent-computer.json
 USER 65532:65532
 ENV CUA_DRIVER_RS_TELEMETRY_ENABLED=0 \
     CUA_TELEMETRY_ENABLED=0 \

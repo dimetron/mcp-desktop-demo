@@ -159,6 +159,35 @@ kagent sandbox exec <id> -- sh -c \
 kagent sandbox download <id> /data/workspace/frame.jpg frame.jpg
 ```
 
+### As a shared desktop that sleeps when idle
+
+`agent-computer-proxy/` serves one long-lived sandbox on a normal port, like
+the Deployment, and lets Substrate suspend it when nobody uses it:
+
+- It creates (or finds) the sandbox `agent-computer` through the controller's
+  kagent-api MCP endpoint. Then it runs `start-desktop.sh` with `GW_TOKEN` and
+  `GW_LISTEN=0.0.0.0:8080`.
+- It reaches port 8080 through Substrate's router: an mTLS `CONNECT
+  actor-upstream:8080` to `atenet-router.ate-system.svc:8444`, with
+  `ate-target-actor: kagent/session-<sandbox id>`. The router resumes a
+  suspended actor before routing.
+- The router must admit the proxy's SPIFFE id
+  (`atenetRouter.ingressAllowedSPIFFEIDs`).
+- After `-idle` (default 15m) with no request and no open stream, it calls
+  `suspend_sandbox`. The next request resumes the sandbox and restarts the
+  desktop (about 4 s).
+- `/computer/status`, `/computer/wake` and `/computer/sleep` (Bearer token)
+  report and change the state.
+
+The proxy also owns the site policy: ConfigMap lists (`allow-*.txt` become the
+sandbox's EgressPolicy, `deny-*.txt` become Chromium's `URLBlocklist`). In a
+sandbox, `start-desktop.sh` imports the egress gateway CA into Chromium's NSS
+database, and desktop-gw sets the agent cursor theme (`GW_CURSOR_THEME`,
+default the image's "+" from `cursor-theme/`) on every MCP session.
+
+The manifest that pi-bot deploys is `pi-bot/deploy/agent-computer.yaml`. To
+build the image: `docker build -t <registry>/agent-computer-proxy agent-computer-proxy`.
+
 ### Kubernetes smoke test
 
 `make kind-e2e` (`k8s-e2e.sh`) needs no kagent controller. It:
